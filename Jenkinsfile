@@ -2,24 +2,38 @@ pipeline {
     agent any
 
     environment {
-        MONGO_URI_TEST  = 'mongodb://localhost:27017/portfolioDB_test'
-        IMAGE_BACKEND   = "portfolio-api"
-        IMAGE_FRONTEND  = "portfolio-react"
-        IMAGE_TAG       = "${BUILD_NUMBER}"
+        IMAGE_BACKEND  = "portfolio-api"
+        IMAGE_FRONTEND = "portfolio-react"
+        IMAGE_TAG      = "${BUILD_NUMBER}"
     }
 
     stages {
 
-        stage('Backend install & test') {
+        stage('Start MongoDB') {
+            steps {
+                sh '''
+                    docker rm -f mongo-test || true
+                    docker run -d \
+                        --name mongo-test \
+                        --network host \
+                        mongo:7
+                    sleep 8
+                '''
+            }
+        }
+
+        stage('Backend install and test') {
             steps {
                 dir('portfolio-api') {
-                    sh 'npm ci'
-                    sh 'npm test -- --watchAll=false --forceExit'
+                    withEnv(['MONGO_URI=mongodb://localhost:27017/portfolioDB_test']) {
+                        sh 'npm ci'
+                        sh 'npm test -- --watchAll=false --forceExit'
+                    }
                 }
             }
         }
 
-        stage('Frontend install & build') {
+        stage('Frontend install and build') {
             steps {
                 dir('React') {
                     sh 'npm ci'
@@ -59,7 +73,7 @@ pipeline {
             steps {
                 sh 'docker compose down || true'
                 sh 'docker compose up -d --build'
-                sh 'sleep 10'
+                sh 'sleep 15'
                 sh 'docker compose ps'
             }
         }
@@ -78,10 +92,10 @@ pipeline {
             cleanWs()
         }
         success {
-            echo "Build #${BUILD_NUMBER} termine avec succes"
+            echo "Build termine avec succes"
         }
         failure {
-            echo "Build #${BUILD_NUMBER} echoue - consulter les logs"
+            echo "Build echoue - consulter les logs"
         }
     }
 }
