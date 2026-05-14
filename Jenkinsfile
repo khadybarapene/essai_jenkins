@@ -6,12 +6,10 @@ pipeline {
         IMAGE_BACKEND   = "portfolio-api"
         IMAGE_FRONTEND  = "portfolio-react"
         IMAGE_TAG       = "${BUILD_NUMBER}"
-        DOCKER_USER     = credentials('dockerhub-credentials')
     }
 
     stages {
 
-        // ─── 1. LINT ──────────────────────────────────────────────────────────
         stage('Lint') {
             parallel {
                 stage('Lint Backend') {
@@ -33,7 +31,6 @@ pipeline {
             }
         }
 
-        // ─── 2. TESTS ─────────────────────────────────────────────────────────
         stage('Start MongoDB') {
             steps {
                 sh '''
@@ -55,7 +52,6 @@ pipeline {
             }
         }
 
-        // ─── 3. BUILD ─────────────────────────────────────────────────────────
         stage('Frontend build') {
             steps {
                 dir('React') {
@@ -70,7 +66,6 @@ pipeline {
             }
         }
 
-        // ─── 4. DOCKER BUILD ──────────────────────────────────────────────────
         stage('Docker build') {
             parallel {
                 stage('Build image backend') {
@@ -92,47 +87,23 @@ pipeline {
             }
         }
 
-        // ─── 5. PUSH REGISTRY ─────────────────────────────────────────────────
-        stage('Push to registry') {
-            when { branch 'main' }
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-credentials',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
-                )]) {
-                    sh "echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin"
-                    sh "docker push $DOCKER_USER/${IMAGE_BACKEND}:${IMAGE_TAG}"
-                    sh "docker push $DOCKER_USER/${IMAGE_BACKEND}:latest"
-                    sh "docker push $DOCKER_USER/${IMAGE_FRONTEND}:${IMAGE_TAG}"
-                    sh "docker push $DOCKER_USER/${IMAGE_FRONTEND}:latest"
-                }
-            }
-        }
-
-        // ─── 6. DÉPLOIEMENT ───────────────────────────────────────────────────
         stage('Deploy') {
-            when { branch 'main' }
             steps {
                 sh 'docker compose down || true'
                 sh 'docker compose up -d --build'
-                sh 'sleep 10' // laisser le temps aux healthchecks
+                sh 'sleep 10'
                 sh 'docker compose ps'
             }
         }
 
-        // ─── 7. HEALTH CHECK POST-DÉPLOIEMENT ─────────────────────────────────
         stage('Health check') {
-            when { branch 'main' }
             steps {
                 sh '''
                     echo "Vérification backend..."
                     curl -f http://localhost:5000/health || exit 1
-
                     echo "Vérification frontend..."
                     curl -f http://localhost:3000 || exit 1
-
-                    echo "✅ Tous les services sont opérationnels"
+                    echo "Tous les services sont operationnels"
                 '''
             }
         }
@@ -140,38 +111,16 @@ pipeline {
 
     post {
         always {
+            // Nettoyage dans le contexte agent (node already provided by agent any)
             sh 'docker rm -f mongo-test || true'
             sh 'docker image prune -f || true'
             cleanWs()
         }
         success {
-            mail(
-                to: 'ton-email@example.com',
-                subject: "✅ Build #${BUILD_NUMBER} réussi — ${JOB_NAME}",
-                body: """
-                    Pipeline terminé avec succès.
-
-                    Job      : ${JOB_NAME}
-                    Build    : #${BUILD_NUMBER}
-                    Branche  : ${GIT_BRANCH}
-                    Durée    : ${currentBuild.durationString}
-                    Lien     : ${BUILD_URL}
-                """
-            )
+            echo "Build #${BUILD_NUMBER} termine avec succes"
         }
         failure {
-            mail(
-                to: 'ton-email@example.com',
-                subject: "❌ Build #${BUILD_NUMBER} échoué — ${JOB_NAME}",
-                body: """
-                    Le pipeline a échoué.
-
-                    Job      : ${JOB_NAME}
-                    Build    : #${BUILD_NUMBER}
-                    Branche  : ${GIT_BRANCH}
-                    Logs     : ${BUILD_URL}console
-                """
-            )
+            echo "Build #${BUILD_NUMBER} echoue - consulter les logs"
         }
     }
 }
