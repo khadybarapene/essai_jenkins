@@ -1,0 +1,38 @@
+# ─── Environnement ────────────────────────────────────────────────────────────
+.env
+.env.development
+.env.production
+.env.local
+.env.*.local
+
+# ─── Dépendances ──────────────────────────────────────────────────────────────
+node_modules/
+.npm/
+
+# ─── Build React ──────────────────────────────────────────────────────────────
+React/build/
+React/.cache/
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+logs/
+
+# ─── Tests ────────────────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+
+# ─── Docker ───────────────────────────────────────────────────────────────────
+# Ne pas ignorer docker-compose.yml ni les Dockerfiles
+# mais ignorer les volumes locaux si montés
+mongo-data/
+
+# ─── Système ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
