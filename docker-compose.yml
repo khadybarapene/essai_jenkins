@@ -61,10 +61,12 @@ services:
         condition: service_healthy   # attend que l'API soit prête
     networks:
       - portfolio-net
+  
 
 # ─── Volumes & réseau ─────────────────────────────────────────────────────────
 volumes:
   mongo-data:
+  
 
 networks:
   portfolio-net:

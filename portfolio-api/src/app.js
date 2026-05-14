@@ -51,6 +51,11 @@ app.get('/', (_req, res) => {
   });
 });
 
+// Route health check
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 // Routes des projets
 app.use('/api/projects', projectRoutes);
 
