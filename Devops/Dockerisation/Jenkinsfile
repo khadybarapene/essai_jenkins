@@ -1,0 +1,166 @@
+pipeline {
+    agent any
+
+    environment {
+        BACKEND_IMAGE = 'khady2026/portfolio-api'
+        FRONTEND_IMAGE = 'khady2026/portfolio-react'
+        KUBECONFIG = '/var/lib/jenkins/.kube/config'
+        SONAR_HOST = 'http://localhost:9000'
+    }
+
+    options {
+        timeout(time: 2, unit: 'HOURS')
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build & Deploy Docker') {
+            steps {
+                sh """
+                    docker compose -p dockerisation \
+                    -f ${WORKSPACE}/docker-compose.yml \
+                    up -d --build --force-recreate mongo api react
+                """
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+
+                sh '''
+                    echo "Attente de SonarQube..."
+
+                    for i in $(seq 1 40)
+                    do
+                        STATUS=$(curl -s http://localhost:9000/api/system/status || true)
+
+                        echo "Tentative $i : $STATUS"
+
+                        if echo "$STATUS" | grep -q '"status":"UP"'
+                        then
+                            echo "SonarQube prêt."
+                            sleep 20
+                            break
+                        fi
+
+                        sleep 10
+                    done
+
+                    rm -rf .scannerwork
+                    rm -rf portfolio-api/.scannerwork
+                    rm -rf React/.scannerwork
+                '''
+
+                withCredentials([
+                    string(credentialsId: 'sonar-api', variable: 'TOKEN_API'),
+                    string(credentialsId: 'sonar-react', variable: 'TOKEN_REACT')
+                ]) {
+
+                    sh '''
+                        echo "Vérification token API..."
+                        curl -u ${TOKEN_API}: ${SONAR_HOST}/api/authentication/validate
+
+                        echo ""
+                        echo "Vérification token React..."
+                        curl -u ${TOKEN_REACT}: ${SONAR_HOST}/api/authentication/validate
+                    '''
+
+                    sh '''
+                        cd portfolio-api
+
+                        /opt/sonar-scanner/bin/sonar-scanner -X \
+                          -Dsonar.projectKey=portfolio-api \
+                          -Dsonar.projectName=portfolio-api \
+                          -Dsonar.host.url=${SONAR_HOST} \
+                          -Dsonar.token=${TOKEN_API}
+
+                        cd ../React
+
+                        /opt/sonar-scanner/bin/sonar-scanner -X \
+                          -Dsonar.projectKey=portfolio-react \
+                          -Dsonar.projectName=portfolio-react \
+                          -Dsonar.host.url=${SONAR_HOST} \
+                          -Dsonar.token=${TOKEN_REACT}
+                    '''
+
+                    sh '''
+                        sleep 20
+
+                        for project in portfolio-api portfolio-react
+                        do
+                            if [ "$project" = "portfolio-api" ]
+                            then
+                                TOKEN=$TOKEN_API
+                            else
+                                TOKEN=$TOKEN_REACT
+                            fi
+
+                            RESULT=$(curl -s -u ${TOKEN}: \
+                            "${SONAR_HOST}/api/qualitygates/project_status?projectKey=${project}")
+
+                            echo "$RESULT"
+                        done
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh '''
+                    kubectl --kubeconfig=$KUBECONFIG cluster-info
+
+                    kubectl --kubeconfig=$KUBECONFIG set image deployment/portfolio-api \
+                    api=${BACKEND_IMAGE}:latest -n portfolio
+
+                    kubectl --kubeconfig=$KUBECONFIG set image deployment/portfolio-react \
+                    react=${FRONTEND_IMAGE}:latest -n portfolio
+
+                    kubectl --kubeconfig=$KUBECONFIG rollout status deployment/portfolio-api \
+                    -n portfolio --timeout=120s
+
+                    kubectl --kubeconfig=$KUBECONFIG rollout status deployment/portfolio-react \
+                    -n portfolio --timeout=120s
+
+                    kubectl --kubeconfig=$KUBECONFIG get pods -n portfolio
+                '''
+            }
+        }
+    }
+
+    post {
+
+        success {
+            mail to: 'khadypene267@gmail.com',
+            subject: "SUCCESS - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            body: """
+Le pipeline s'est exécuté avec succès.
+
+Frontend : http://localhost:3000
+Backend  : http://localhost:5000
+SonarQube: http://localhost:9000
+"""
+        }
+
+        failure {
+            mail to: 'khadypene267@gmail.com',
+            subject: "ECHEC - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            body: """
+Le pipeline a échoué.
+
+Consultez les logs :
+${env.BUILD_URL}console
+"""
+        }
+
+        always {
+            sh 'docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" || true'
+        }
+    }
+}
