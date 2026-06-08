@@ -1,164 +1,125 @@
 pipeline {
     agent any
-
     environment {
-        BACKEND_IMAGE = 'khady2026/portfolio-api'
+        BACKEND_IMAGE  = 'khady2026/portfolio-api'
         FRONTEND_IMAGE = 'khady2026/portfolio-react'
-        KUBECONFIG = '/var/lib/jenkins/.kube/config'
-        SONAR_HOST = 'http://localhost:9000'
+        KUBECONFIG     = '/var/lib/jenkins/.kube/config'
     }
-
     options {
         timeout(time: 2, unit: 'HOURS')
+        buildDiscarder(logRotator(numToKeepStr: '5'))
     }
-
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
-
-        stage('Build & Deploy Docker') {
+        stage('Tests & Coverage') {
             steps {
-                sh """
-                    docker compose -p dockerisation \
-                    -f ${WORKSPACE}/docker-compose.yml \
-                    up -d --build --force-recreate mongo api react
-                """
+                sh 'cd portfolio-api && npm ci && npm run test:coverage'
+                sh 'cd React && npm ci && npm test -- --coverage --watchAll=false'
             }
         }
-
+        stage('Build & Deploy Docker') {
+            steps {
+                sh "docker compose -p dockerisation -f ${WORKSPACE}/docker-compose.yml up -d --build --force-recreate --no-deps mongo api react"
+            }
+        }
         stage('SonarQube Analysis') {
             steps {
-
                 sh '''
-                    echo "Attente de SonarQube..."
-
-                    for i in $(seq 1 40)
-                    do
-                        STATUS=$(curl -s http://localhost:9000/api/system/status || true)
-
-                        echo "Tentative $i : $STATUS"
-
-                        if echo "$STATUS" | grep -q '"status":"UP"'
-                        then
-                            echo "SonarQube prêt."
-                            sleep 20
-                            break
+                    echo "Attente que SonarQube soit pret..."
+                    for i in $(seq 1 24); do
+                        RESPONSE=$(curl -s http://localhost:9000/api/system/status 2>/dev/null || echo "")
+                        echo "Tentative $i/24 - Response: $RESPONSE"
+                        if echo "$RESPONSE" | grep -q '"status":"UP"'; then
+                            echo "SonarQube UP, attente 60s initialisation..."
+                            sleep 60
+                            echo "SonarQube est pret !"
+                            exit 0
                         fi
-
-                        sleep 10
+                        sleep 15
                     done
-
-                    rm -rf .scannerwork
-                    rm -rf portfolio-api/.scannerwork
-                    rm -rf React/.scannerwork
+                    echo "SonarQube n a pas demarre a temps"
+                    exit 1
                 '''
-
+                sh 'rm -rf .scannerwork portfolio-api/.scannerwork React/.scannerwork'
                 withCredentials([
                     string(credentialsId: 'sonar-api', variable: 'TOKEN_API'),
                     string(credentialsId: 'sonar-react', variable: 'TOKEN_REACT')
                 ]) {
-
+                    withSonarQubeEnv('SonarQube') {
+                        sh '''
+                            cd portfolio-api && /opt/sonar-scanner/bin/sonar-scanner \
+                                -Dsonar.projectKey=portfolio-api \
+                                -Dsonar.host.url=http://localhost:9000 \
+                                -Dsonar.token=$TOKEN_API
+                            cd ../React && /opt/sonar-scanner/bin/sonar-scanner \
+                                -Dsonar.projectKey=portfolio-react \
+                                -Dsonar.host.url=http://localhost:9000 \
+                                -Dsonar.token=$TOKEN_REACT
+                        '''
+                    }
                     sh '''
-                        echo "Vérification token API..."
-                        curl -u ${TOKEN_API}: ${SONAR_HOST}/api/authentication/validate
-
-                        echo ""
-                        echo "Vérification token React..."
-                        curl -u ${TOKEN_REACT}: ${SONAR_HOST}/api/authentication/validate
-                    '''
-
-                    sh '''
-                        cd portfolio-api
-
-                        /opt/sonar-scanner/bin/sonar-scanner -X \
-                          -Dsonar.projectKey=portfolio-api \
-                          -Dsonar.projectName=portfolio-api \
-                          -Dsonar.host.url=${SONAR_HOST} \
-                          -Dsonar.token=${TOKEN_API}
-
-                        cd ../React
-
-                        /opt/sonar-scanner/bin/sonar-scanner -X \
-                          -Dsonar.projectKey=portfolio-react \
-                          -Dsonar.projectName=portfolio-react \
-                          -Dsonar.host.url=${SONAR_HOST} \
-                          -Dsonar.token=${TOKEN_REACT}
-                    '''
-
-                    sh '''
-                        sleep 20
-
-                        for project in portfolio-api portfolio-react
-                        do
-                            if [ "$project" = "portfolio-api" ]
-                            then
-                                TOKEN=$TOKEN_API
-                            else
-                                TOKEN=$TOKEN_REACT
-                            fi
-
-                            RESULT=$(curl -s -u ${TOKEN}: \
-                            "${SONAR_HOST}/api/qualitygates/project_status?projectKey=${project}")
-
-                            echo "$RESULT"
+                        sleep 30
+                        for project in portfolio-api portfolio-react; do
+                            TOKEN=$TOKEN_API
+                            [ "$project" = "portfolio-react" ] && TOKEN=$TOKEN_REACT
+                            STATUS=$(curl -s -u "$TOKEN:" \
+                                "http://localhost:9000/api/qualitygates/project_status?projectKey=$project" \
+                                | grep -o '"status":"[^"]*"' | head -1)
+                            echo "$project Quality Gate: $STATUS"
+                            echo "$STATUS" | grep -q "ERROR" && echo "Quality Gate FAILED" && exit 1
                         done
+                        echo "Quality Gates OK !"
                     '''
                 }
             }
         }
-
         stage('Deploy to Kubernetes') {
             steps {
                 sh '''
-                    kubectl --kubeconfig=$KUBECONFIG cluster-info
-
-                    kubectl --kubeconfig=$KUBECONFIG set image deployment/portfolio-api \
-                    api=${BACKEND_IMAGE}:latest -n portfolio
-
-                    kubectl --kubeconfig=$KUBECONFIG set image deployment/portfolio-react \
-                    react=${FRONTEND_IMAGE}:latest -n portfolio
-
-                    kubectl --kubeconfig=$KUBECONFIG rollout status deployment/portfolio-api \
-                    -n portfolio --timeout=120s
-
-                    kubectl --kubeconfig=$KUBECONFIG rollout status deployment/portfolio-react \
-                    -n portfolio --timeout=120s
-
-                    kubectl --kubeconfig=$KUBECONFIG get pods -n portfolio
+                    kubectl --kubeconfig=/var/lib/jenkins/.kube/config set image \
+                        deployment/portfolio-api api=khady2026/portfolio-api:latest -n portfolio
+                    kubectl --kubeconfig=/var/lib/jenkins/.kube/config set image \
+                        deployment/portfolio-react react=khady2026/portfolio-react:latest -n portfolio
+                    kubectl --kubeconfig=/var/lib/jenkins/.kube/config rollout status \
+                        deployment/portfolio-api -n portfolio --timeout=120s
+                    kubectl --kubeconfig=/var/lib/jenkins/.kube/config rollout status \
+                        deployment/portfolio-react -n portfolio --timeout=120s
+                    echo "Deploiement Kubernetes reussi !"
+                    kubectl --kubeconfig=/var/lib/jenkins/.kube/config get pods -n portfolio
+                '''
+            }
+        }
+        stage('Health Check') {
+            steps {
+                sh '''
+                    sleep 15
+                    for i in 1 2 3 4 5; do
+                        curl -fsS http://127.0.0.1:5000/ && echo "Backend OK" && break
+                        sleep 5
+                    done
+                    for i in 1 2 3 4 5; do
+                        curl -fsS http://127.0.0.1:3000/ && echo "Frontend OK" && break
+                        sleep 5
+                    done
                 '''
             }
         }
     }
-
     post {
-
         success {
             mail to: 'khadypene267@gmail.com',
-            subject: "SUCCESS - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-            body: """
-Le pipeline s'est exécuté avec succès.
-
-Frontend : http://localhost:3000
-Backend  : http://localhost:5000
-SonarQube: http://localhost:9000
-"""
+                 subject: "✅ SUCCESS - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                 body: "Pipeline réussi.\nFrontend Docker: http://localhost:3000\nBackend: http://localhost:5000\nKubernetes: http://192.168.49.2:30080\nSonarQube: http://localhost:9000"
         }
-
         failure {
             mail to: 'khadypene267@gmail.com',
-            subject: "ECHEC - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-            body: """
-Le pipeline a échoué.
-
-Consultez les logs :
-${env.BUILD_URL}console
-"""
+                 subject: "❌ ECHEC - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                 body: "Pipeline échoué.\nLogs: ${env.BUILD_URL}console"
         }
-
         always {
             sh 'docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" || true'
         }
