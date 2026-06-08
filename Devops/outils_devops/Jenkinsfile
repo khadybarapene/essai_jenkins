@@ -1,0 +1,136 @@
+pipeline {
+    agent any
+    environment {
+        BACKEND_IMAGE  = 'khady2026/portfolio-api'
+        FRONTEND_IMAGE = 'khady2026/portfolio-react'
+        KUBECONFIG     = '/var/lib/jenkins/.kube/config'
+    }
+    options {
+        timeout(time: 2, unit: 'HOURS')
+    }
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build & Deploy') {
+            steps {
+                sh """
+                    docker compose -p dockerisation \
+                        -f ${WORKSPACE}/docker-compose.yml \
+                        up -d --build --force-recreate --no-deps mongo api react
+                """
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                sh '''
+                    echo "Attente que SonarQube soit pret..."
+                    for i in $(seq 1 40); do
+                        RESPONSE=$(curl -s http://localhost:9000/api/system/status 2>/dev/null || echo "")
+                        echo "Tentative $i/40 - Response: $RESPONSE"
+                        if echo "$RESPONSE" | grep -q '"status":"UP"'; then
+                            echo "SonarQube UP, attente 30s finalisation..."
+                            sleep 30
+                            echo "SonarQube est pret !"
+                            break
+                        fi
+                        echo "SonarQube pas encore pret, attente 15s..."
+                        sleep 15
+                        if [ "$i" -eq 40 ]; then
+                            echo "ERREUR: SonarQube n a pas demarre apres 10 minutes"
+                            docker logs dockerisation-sonarqube-1 --tail 50 || true
+                            exit 1
+                        fi
+                    done
+                '''
+                sh 'rm -rf .scannerwork portfolio-api/.scannerwork React/.scannerwork'
+                withCredentials([
+                    string(credentialsId: 'sonar-api',   variable: 'TOKEN_API'),
+                    string(credentialsId: 'sonar-react',  variable: 'TOKEN_REACT')
+                ]) {
+                    withSonarQubeEnv('SonarQube') {
+                        sh '''
+                            cd portfolio-api && /opt/sonar-scanner/bin/sonar-scanner \
+                                -Dsonar.projectKey=portfolio-api \
+                                -Dsonar.host.url=http://localhost:9000 \
+                                -Dsonar.token=${TOKEN_API}
+
+                            cd ../React && /opt/sonar-scanner/bin/sonar-scanner \
+                                -Dsonar.projectKey=portfolio-react \
+                                -Dsonar.host.url=http://localhost:9000 \
+                                -Dsonar.token=${TOKEN_REACT}
+                        '''
+                    }
+                    sh '''
+                        sleep 30
+                        for project in portfolio-api portfolio-react; do
+                            if [ "$project" = "portfolio-react" ]; then
+                                TOKEN=${TOKEN_REACT}
+                            else
+                                TOKEN=${TOKEN_API}
+                            fi
+                            STATUS=$(curl -s -u "${TOKEN}:" \
+                                "http://localhost:9000/api/qualitygates/project_status?projectKey=${project}" \
+                                | grep -o '"status":"[^"]*"' | head -1)
+                            echo "$project Quality Gate: $STATUS"
+                            if echo "$STATUS" | grep -q "ERROR"; then
+                                echo "Quality Gate FAILED pour $project"
+                                exit 1
+                            fi
+                        done
+                        echo "Quality Gates OK !"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh '''
+                    if ! kubectl --kubeconfig "$KUBECONFIG" cluster-info --request-timeout=10s > /dev/null 2>&1; then
+                        echo "ERREUR: Cluster Kubernetes inaccessible."
+                        exit 1
+                    fi
+
+                    echo "Cluster accessible, deploiement en cours..."
+
+                    kubectl --kubeconfig "$KUBECONFIG" set image deployment/portfolio-api \
+                        api=${BACKEND_IMAGE}:latest -n portfolio
+
+                    kubectl --kubeconfig "$KUBECONFIG" set image deployment/portfolio-react \
+                        react=${FRONTEND_IMAGE}:latest -n portfolio
+
+                    kubectl --kubeconfig "$KUBECONFIG" rollout status deployment/portfolio-api \
+                        -n portfolio --timeout=120s
+
+                    kubectl --kubeconfig "$KUBECONFIG" rollout status deployment/portfolio-react \
+                        -n portfolio --timeout=120s
+
+                    echo "Deploiement Kubernetes reussi !"
+                    kubectl --kubeconfig "$KUBECONFIG" get pods -n portfolio
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            mail to: 'khadypene267@gmail.com',
+                 subject: "✅ SUCCESS - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                 body: "Pipeline réussi.\nFrontend: http://localhost:3000\nBackend: http://localhost:5000\nSonarQube: http://localhost:9000"
+        }
+        failure {
+            mail to: 'khadypene267@gmail.com',
+                 subject: "❌ ECHEC - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                 body: "Pipeline échoué.\nLogs: ${env.BUILD_URL}console"
+        }
+        always {
+            sh 'docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" || true'
+        }
+    }
+}
